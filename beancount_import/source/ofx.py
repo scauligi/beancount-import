@@ -597,7 +597,7 @@ RELATED_ACCOUNT_KEYS = ['aftertax_account', 'pretax_account', 'match_account']
 TOLERANCE = 0.05
 
 class ParsedOfxStatement(object):
-    def __init__(self, seen_fitids, filename, securities_map, org, stmtrs):
+    def __init__(self, seen_fitids, filename, securities_map, org, stmtrs, prepare_state):
         filename = os.path.abspath(filename)
         self.filename = filename
         self.securities_map = securities_map
@@ -620,12 +620,21 @@ class ParsedOfxStatement(object):
 
         self.ofx_id = account_ofx_id = (org, self.broker_id, account_id)
 
+        account = prepare_state.ofx_id_to_account.get(self.ofx_id)
+        scrub_fitids = account.meta.get('ofx_scrub_fitids')
+        seen_base_fitids = collections.Counter()
+
         for invtranlist in stmtrs.find_all(re.compile('invtranlist|banktranlist')):
             for tran in invtranlist.find_all(
                     re.compile(
                         '^(buymf|sellmf|reinvest|buystock|sellstock|buyopt|sellopt|transfer|income|invbanktran|stmttrn)$'
                     )):
                 fitid = find_child(tran, 'fitid')
+                if scrub_fitids:
+                    base_fitid = re.sub(scrub_fitids, r'\1', fitid)
+                    seen_base_fitids[base_fitid] += 1
+                    count = seen_base_fitids[base_fitid]
+                    fitid = base_fitid + f'-{count:04}'
                 date = parse_ofx_time(
                     find_child(tran, 'dttrade') or
                     find_child(tran, 'dtposted')).date()
@@ -1148,7 +1157,7 @@ class ParsedOfxStatement(object):
 
 
 class ParsedOfxFile(object):
-    def __init__(self, seen_fitids, filename):
+    def __init__(self, seen_fitids, filename, prepare_state):
         self.filename = filename
         parsed_statements = self.parsed_statements = []
 
@@ -1170,7 +1179,8 @@ class ParsedOfxFile(object):
                     filename=filename,
                     securities_map=securities_map,
                     org=org,
-                    stmtrs=stmtrs))
+                    stmtrs=stmtrs,
+                    prepare_state=prepare_state))
 
 
 def get_account_map(accounts):
@@ -1241,8 +1251,6 @@ class PrepareState(object):
         self.matched_cash_transfer_transactions = dict(
         )  # type: Dict[FullFitid, List[Tuple[Transaction, Posting]]]
         self.results = results
-
-        self._process_journal_entries()
 
     def get_accounts_and_entries(self):
         for parsed_file in self.source.parsed_files:
@@ -1328,44 +1336,9 @@ class OfxSource(Source):
                  **kwargs) -> None:
         super().__init__(**kwargs)
         self.ofx_filenames = [os.path.realpath(x) for x in ofx_filenames]
+        self.cache_filename = cache_filename
         self.source_fitids = set()  # type: Set[FullFitid]
         self.parsed_files = []  # type: List[ParsedOfxFile]
-        cached_ofx_filenames = set()  # type: Set[str]
-        if cache_filename is not None:
-            # Try to read cache
-            try:
-                with open(cache_filename, 'rb') as cache_f:
-                    cache_data = pickle.load(cache_f)
-                    version = cache_data['version']
-                    if version != cache_version_number:
-                        raise RuntimeError('invalid version')
-                    cached_ofx_filenames.update(
-                        s.filename for s in cache_data['parsed_files'])
-                    if not cached_ofx_filenames.issubset(set(ofx_filenames)):
-                        raise RuntimeError('filenames are not subset')
-                    parsed_files = cache_data['parsed_files']
-                    self.source_fitids.update(cache_data['source_fitids'])
-                    self.parsed_files.extend(parsed_files)
-            except:
-                import traceback
-                traceback.print_exc()
-                self.log_status('ofx: Not using OFX cache due to an error')
-
-        for filename in ofx_filenames:
-            if filename in cached_ofx_filenames:
-                continue
-            self.log_status('ofx: loading %s' % filename)
-            self.parsed_files.append(
-                ParsedOfxFile(self.source_fitids, filename))
-
-        if cache_filename is not None:
-            cache_data = {
-                'version': cache_version_number,
-                'source_fitids': self.source_fitids,
-                'parsed_files': self.parsed_files
-            }
-            with atomic_write(cache_filename, mode='wb', overwrite=True) as wcache_f:
-                pickle.dump(cache_data, wcache_f)
 
     def get_example_key_value_pairs(self, transaction: Transaction,
                                     posting: Posting) -> ExampleKeyValuePairs:
@@ -1392,6 +1365,44 @@ class OfxSource(Source):
 
     def prepare(self, journal: JournalEditor, results: SourceResults):
         state = PrepareState(self, journal, results)
+        cached_ofx_filenames = set()  # type: Set[str]
+        if self.cache_filename is not None:
+            # Try to read cache
+            try:
+                with open(self.cache_filename, 'rb') as cache_f:
+                    cache_data = pickle.load(cache_f)
+                    version = cache_data['version']
+                    if version != cache_version_number:
+                        raise RuntimeError('invalid version')
+                    cached_ofx_filenames.update(
+                        s.filename for s in cache_data['parsed_files'])
+                    if not cached_ofx_filenames.issubset(set(self.ofx_filenames)):
+                        raise RuntimeError('filenames are not subset')
+                    parsed_files = cache_data['parsed_files']
+                    self.source_fitids.update(cache_data['source_fitids'])
+                    self.parsed_files.extend(parsed_files)
+            except:
+                import traceback
+                traceback.print_exc()
+                self.log_status('ofx: Not using OFX cache due to an error')
+
+        for filename in self.ofx_filenames:
+            if filename in cached_ofx_filenames:
+                continue
+            self.log_status('ofx: loading %s' % filename)
+            self.parsed_files.append(
+                ParsedOfxFile(self.source_fitids, filename, state))
+
+        if self.cache_filename is not None:
+            cache_data = {
+                'version': cache_version_number,
+                'source_fitids': self.source_fitids,
+                'parsed_files': self.parsed_files
+            }
+            with atomic_write(self.cache_filename, mode='wb', overwrite=True) as wcache_f:
+                pickle.dump(cache_data, wcache_f)
+
+        state._process_journal_entries()
         state.get_accounts_and_entries()
 
     @property

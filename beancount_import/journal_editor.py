@@ -145,6 +145,7 @@ def load_file(filename: str, encoding: Optional[str] = None):
         filename = os.path.realpath(filename)
 
         orig_book_func = beancount.parser.booking.book
+        orig_xform_func = beancount.loader.run_transformations
         pre_booking_entries = None
         post_booking_entries = None
 
@@ -156,7 +157,11 @@ def load_file(filename: str, encoding: Optional[str] = None):
             post_booking_entries = entries
             return entries, balance_errors
 
+        def intercept_transform(entries, parse_errors, options_map, log_timings):
+            return entries, list(parse_errors)
+
         beancount.parser.booking.book = intercept_book
+        beancount.loader.run_transformations = intercept_transform
         try:
             entries, errors, options_map = beancount.loader._load(
                 [(filename, True)],
@@ -165,6 +170,7 @@ def load_file(filename: str, encoding: Optional[str] = None):
                 encoding=encoding)
         finally:
             beancount.parser.booking.book = orig_book_func
+            beancount.loader.run_transformations = orig_xform_func
         assert pre_booking_entries is not None
         assert post_booking_entries is not None
         return (entries, errors, options_map, pre_booking_entries,
@@ -635,7 +641,7 @@ def get_meta_ignore() -> FrozenSet[str]:
 
 META_IGNORE = get_meta_ignore()
 
-metadata_line_re = '^ +([a-z][a-zA-Z0-9\\-_]*) *: *([^a-zA-Z].*)$'
+metadata_line_re = '^ +([a-z][a-zA-Z0-9\\-_]*) *: *([^a-zA-Z].*)?$'
 
 
 def compute_metadata_changes(builder, old_meta, new_meta, indent):

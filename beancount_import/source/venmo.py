@@ -13,11 +13,11 @@ You might have a directory structure like:
       data/
         venmo/
           account_id/
-            transactions.csv
+            venmo_statement.csv
             balances.csv
 
 
-The `transactions.csv` file should be a CSV file containing all downloaded
+The `venmo_statement.csv` file should be a CSV file containing all downloaded
 transactions, in the normal CSV download format provided by Venmo.  See the
 `testdata/source/venmo` directory for an example.
 
@@ -28,7 +28,7 @@ The `balances.csv` file should be of the form:
     "2017-12-31","2018-01-20","$1528.25","$0.00"
     "2018-01-21","2018-01-26","unknown","unknown"
 
-The `transactions.csv` file is required, but the `balances.csv` file is
+The `venmo_statement.csv` file is required, but the `balances.csv` file is
 optional.
 
 The Venmo website does not provide a way to directly download a single CSV file
@@ -102,7 +102,7 @@ transaction is generated:
 
 The `venmo_payment_id` and `venmo_transfer_id` metadata fields are used to
 associate transactions in the Beancount journal with rows in the
-`transactions.csv` file.
+`venmo_statement.csv` file.
 
 For transfer transactions (transactions with a `venmo_transfer_id` metadata
 field), the `venmo_type` and `venmo_account_description` metadata fields provide
@@ -149,6 +149,7 @@ CSV_AMOUNT_TOTAL_KEY = 'Amount (total)'
 CSV_AMOUNT_FEE_KEY = 'Amount (fee)'
 CSV_FUNDING_SOURCE_KEY = 'Funding Source'
 CSV_DESTINATION_KEY = 'Destination'
+CSV_ENDING_BALANCE_KEY = 'Ending Balance'
 
 transaction_field_names = [
     CSV_ID_KEY,
@@ -162,6 +163,7 @@ transaction_field_names = [
     CSV_AMOUNT_FEE_KEY,
     CSV_FUNDING_SOURCE_KEY,
     CSV_DESTINATION_KEY,
+    CSV_ENDING_BALANCE_KEY,
 ]
 
 BALANCE_START_DATE_KEY = 'Start Date'
@@ -222,19 +224,23 @@ def get_venmo_account_map(accounts: Dict[str, Open]):
 
 
 class VenmoSource(Source):
-    def __init__(self, directory: str, assets_account: str, **kwargs) -> None:
+    def __init__(self, directory: str, assets_account: str, payee_map: Dict[str, str] = {}, **kwargs) -> None:
         super().__init__(**kwargs)
         self.directory = directory
         self.assets_account = assets_account
-        transactions_path = os.path.join(directory, 'transactions.csv')
-        self.log_status('venmo: loading %s ' % transactions_path)
-        self.raw_transactions = load_transactions(transactions_path)
+        transactions_path = os.path.join(directory, 'venmo_statement.csv')
+        if os.path.exists(transactions_path):
+            self.log_status('venmo: loading %s ' % transactions_path)
+            self.raw_transactions = load_transactions(transactions_path)
+        else:
+            self.raw_transactions = []
         balances_path = os.path.join(directory, 'balances.csv')
         if os.path.exists(balances_path):
             self.log_status('venmo: loading %s ' % balances_path)
             self.raw_balances = load_balances(balances_path)
         else:
             self.raw_balances = []
+        self.payee_map = payee_map
 
     def get_example_key_value_pairs(self, transaction: Transaction, posting: Posting):
         result = dict()
@@ -279,6 +285,7 @@ class VenmoSource(Source):
 
         valid_ids = set()
 
+        latest_date = datetime.date(1, 1, 1)
         for raw_txn in self.raw_transactions:
             venmo_id = raw_txn[CSV_ID_KEY]
             t = raw_txn[CSV_TYPE_KEY]
@@ -291,6 +298,26 @@ class VenmoSource(Source):
             elif t == 'Charge' or t == 'Payment':
                 has_transfer = raw_txn[CSV_FUNDING_SOURCE_KEY] != 'Venmo balance' and raw_txn[CSV_DESTINATION_KEY] != 'Venmo balance'
                 has_payment = True
+            elif raw_txn[CSV_ENDING_BALANCE_KEY]:
+                amount = amount_parsing.parse_amount(raw_txn[CSV_ENDING_BALANCE_KEY])
+                balance_date = latest_date + datetime.timedelta(days=1)
+                results.add_pending_entry(
+                    ImportResult(
+                        date=balance_date,
+                        entries=[
+                            Balance(
+                                date=balance_date,
+                                meta=None,
+                                account=self.assets_account,
+                                amount=amount,
+                                tolerance=None,
+                                diff_amount=None,
+                            )
+                        ],
+                        info=get_info(raw_txn),
+                    ))
+            elif not t:
+                continue
             else:
                 raise RuntimeError('Unknown transaction type: %r' % (t,))
             for has, matched_postings, make in ((has_transfer, matched_transfer_postings, self.make_transfer_transaction),
@@ -302,6 +329,7 @@ class VenmoSource(Source):
                         results.add_invalid_reference(InvalidSourceReference(len(existing) - num_needed, existing))
                 elif has:
                     txn = make(raw_txn, has_transfer and has_payment)
+                    latest_date = max(latest_date, txn.date)
                     results.add_pending_entry(
                         ImportResult(
                             date=txn.date, entries=[txn], info=get_info(raw_txn)))
@@ -366,12 +394,13 @@ class VenmoSource(Source):
                     ]),
                 )
         note = re.sub(r'\s+', ' ', raw_txn[CSV_NOTE_KEY])
-        payee = 'Venmo'
+        payee = ''
         if is_payment_txn:
             if original_amount.number > ZERO:
                 payee = assets_posting.meta[VENMO_PAYER_KEY] = raw_txn[CSV_FROM_KEY if txn_type == 'Payment' else CSV_TO_KEY]
             else:
                 payee = assets_posting.meta[VENMO_PAYEE_KEY] = raw_txn[CSV_TO_KEY if txn_type == 'Payment' else CSV_FROM_KEY]
+            payee = self.payee_map.get(payee, payee)
         if note:
             assets_posting.meta[VENMO_DESCRIPTION_KEY] = note
         if is_transfer:
@@ -385,7 +414,7 @@ class VenmoSource(Source):
             date=txn_time.date(),
             flag=FLAG_OKAY,
             payee=payee,
-            narration='Transfer' if is_transfer else note,
+            narration='' if is_transfer else note,
             tags=EMPTY_SET,
             links=links,
             postings=[

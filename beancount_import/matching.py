@@ -368,6 +368,7 @@ TRANSACTION_POSTING_COUNT_KEYS = [
     NUM_UNKNOWN_POSTINGS_REMOVED_KEY,
 ]
 IGNORED_META_KEYS_FOR_MATCHING = frozenset(['lineno', 'filename'])
+OPTIONAL_META_KEYS_FOR_MATCHING = frozenset(['date'])
 
 TRANSACTION_TEMP_METADATA_KEYS = TRANSACTION_POSTING_COUNT_KEYS
 
@@ -840,7 +841,10 @@ def is_metadata_mergeable(*metas: Optional[Meta]) -> bool:
         for k, v in meta.items():
             if k in IGNORED_META_KEYS_FOR_MATCHING:
                 continue
-            if combined.setdefault(k, v) != v:
+            if k in OPTIONAL_META_KEYS_FOR_MATCHING:
+                if v is None:
+                    continue
+            elif combined.setdefault(k, v) != v:
                 return False
     return True
 
