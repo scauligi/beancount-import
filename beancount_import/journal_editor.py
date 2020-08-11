@@ -149,11 +149,11 @@ def load_file(filename: str, encoding: Optional[str] = None):
         pre_booking_entries = None
         post_booking_entries = None
 
-        def intercept_book(entries, options_map):
+        def intercept_book(entries, options_map, do_booking):
             nonlocal pre_booking_entries
             nonlocal post_booking_entries
             pre_booking_entries = entries
-            entries, balance_errors = orig_book_func(entries, options_map)
+            entries, balance_errors = orig_book_func(entries, options_map, do_booking)
             post_booking_entries = entries
             return entries, balance_errors
 
