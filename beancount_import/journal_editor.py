@@ -652,8 +652,8 @@ def compute_metadata_changes(builder, old_meta, new_meta, indent):
         printer.write_metadata({key: new_meta[key]}, oss, prefix=' ' * indent)
         return oss.getvalue().rstrip()
 
-    old_meta_not_seen = set(old_meta.keys())
-    old_meta_not_seen.difference_update(META_IGNORE)
+    old_meta_not_seen = collections.Counter({k: len(v) if isinstance(v, list) else 1 for k, v in old_meta.items()})
+    old_meta_not_seen.subtract(META_IGNORE)
     while True:
         line = builder.cur_orig_line
         if line is None:
@@ -662,15 +662,16 @@ def compute_metadata_changes(builder, old_meta, new_meta, indent):
         if m is None:
             break
         key = m.group(1)
-        if key not in old_meta_not_seen:
+        if old_meta_not_seen[key] <= 0:
             builder.raise_error('unexpected metadata key %r found' % (key, ))
-        old_meta_not_seen.remove(key)
+        old_meta_not_seen[key] -= 1
         if key not in new_meta:
             builder.delete_line()
         elif new_meta[key] != old_meta[key]:
             builder.replace_line(format_metadata_line(key))
         else:
             builder.keep_line()
+    old_meta_not_seen = +old_meta_not_seen
     if old_meta_not_seen:
         builder.raise_error('expected metadata keys %r' % (old_meta_not_seen, ))
     for key in new_meta:

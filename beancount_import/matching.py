@@ -1209,9 +1209,15 @@ def get_combined_transactions(txns: Tuple[Transaction, Transaction],
     return results, postings_matched
 
 
+def get_value_identifier(value):
+    if isinstance(value, list):
+        return frozenset(enumerate(value))
+    return value
+
+
 def get_posting_identifier(posting: Posting) -> Posting:
     if posting.meta:
-        meta = [(k, v) for k, v in posting.meta.items() if k not in META_IGNORE]
+        meta = [(k, get_value_identifier(v)) for k, v in posting.meta.items() if k not in META_IGNORE]
     else:
         meta = []
     return posting._replace(meta=frozenset(meta))
